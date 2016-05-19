@@ -33,6 +33,8 @@
 /* ARC header files.  */
 #include "opcode/arc.h"
 #include "arc-tdep.h"
+#include "arch/arc-insn.h"
+#include "dis-asm.h"
 
 /* Standard headers.  */
 #include <algorithm>
@@ -665,7 +667,7 @@ arc_skip_prologue (struct gdbarch *gdbarch, CORE_ADDR pc)
    that will not print, or `stream` should be different from standard
    gdb_stdlog.  */
 
-static int
+int
 arc_delayed_print_insn (bfd_vma addr, struct disassemble_info *info)
 {
   int (*print_insn) (bfd_vma, struct disassemble_info *);
@@ -1278,6 +1280,22 @@ maintenance_print_arc_command (char *args, int from_tty)
   cmd_show_list (maintenance_print_arc_list, from_tty, "");
 }
 
+/* This command accepts single argument - address of instruction to
+   disassemble.  */
+
+static void
+dump_arc_instruction_command (char *args, int from_tty)
+{
+  if (!(args != NULL && strlen (args) > 0))
+    return;
+
+  CORE_ADDR address = string_to_core_addr (args);
+  struct gdbarch *gdbarch = target_gdbarch ();
+  struct arc_instruction insn;
+  arc_insn_decode (gdbarch, address, &insn);
+  arc_insn_dump (insn);
+}
+
 /* Suppress warning from -Wmissing-prototypes.  */
 extern initialize_file_ftype _initialize_arc_tdep;
 
@@ -1297,6 +1315,11 @@ _initialize_arc_tdep (void)
 		    "internal state."),
 		  &maintenance_print_arc_list, "maintenance print arc ", 0,
 		  &maintenanceprintlist);
+
+  add_cmd ("arc-instruction", class_maintenance,
+	   dump_arc_instruction_command,
+	   _("Dump  arc_instruction structure for specified address."),
+	   &maintenance_print_arc_list);
 
   /* Debug internals for ARC GDB.  */
   add_setshow_zinteger_cmd ("arc", class_maintenance,

@@ -2310,6 +2310,10 @@ waitstatus.o: ${srcdir}/target/waitstatus.c
 # Need to explicitly specify the compile rule as make will do nothing
 # or try to compile the object file into the sub-directory.
 
+arc-insn.o: ${srcdir}/arch/arc-insn.c
+	$(COMPILE) $<
+	$(POSTCOMPILE)
+
 arm.o: ${srcdir}/arch/arm.c
 	$(COMPILE) $(srcdir)/arch/arm.c
 	$(POSTCOMPILE)

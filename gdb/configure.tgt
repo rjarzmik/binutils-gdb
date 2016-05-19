@@ -85,7 +85,7 @@ am33_2.0*-*-linux*)
 
 arc*-*-*)
 	# Target: baremetal ARC elf32 target
-	gdb_target_obs="arc-tdep.o"
+	gdb_target_obs="arc-insn.o arc-tdep.o"
 	;;
 
 arm*-wince-pe | arm*-*-mingw32ce*)
