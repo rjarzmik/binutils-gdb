@@ -1231,6 +1231,12 @@ print_insn_arc (bfd_vma memaddr,
 	}
     }
 
+  /* Assign arc_opcode as a private data of disassemble_info to give GDB more
+     information about instruction.  For example to do prologue analysis GDB
+     needs to know what instruction does, what are instruction operands,
+     whether it has condition code, etc.  */
+  info->private_data = (void *) opcode;
+
   return insn_len;
 }
 
