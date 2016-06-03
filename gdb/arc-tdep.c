@@ -59,6 +59,10 @@ struct arc_frame_cache
 
 int arc_debug;
 
+/* List of "maintenance print arc" commands.  */
+
+static struct cmd_list_element *maintenance_print_arc_list = NULL;
+
 /* XML target description features.  */
 
 static const char core_v2_feature_name[] = "org.gnu.gdb.arc.core.v2";
@@ -1266,6 +1270,14 @@ arc_dump_tdep (struct gdbarch *gdbarch, struct ui_file *file)
   /* Empty for now.  */
 }
 
+/* Wrapper for "maintenance print arc" list of commands.  */
+
+static void
+maintenance_print_arc_command (char *args, int from_tty)
+{
+  cmd_show_list (maintenance_print_arc_list, from_tty, "");
+}
+
 /* Suppress warning from -Wmissing-prototypes.  */
 extern initialize_file_ftype _initialize_arc_tdep;
 
@@ -1278,6 +1290,13 @@ _initialize_arc_tdep (void)
   initialize_tdesc_arc_arcompact ();
 
   /* Register ARC-specific commands with gdb.  */
+
+  /* Add root prefix command for "maintenance print arc" commands.  */
+  add_prefix_cmd ("arc", class_maintenance, maintenance_print_arc_command,
+		  _("ARC-specific maintenance commands for printing GDB "
+		    "internal state."),
+		  &maintenance_print_arc_list, "maintenance print arc ", 0,
+		  &maintenanceprintlist);
 
   /* Debug internals for ARC GDB.  */
   add_setshow_zinteger_cmd ("arc", class_maintenance,
