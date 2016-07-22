@@ -504,7 +504,7 @@ static const struct arc_reloc_op_tag
   DEF (tpoff,   BFD_RELOC_ARC_TLS_LE_32,	1),
   DEF (dtpoff9, BFD_RELOC_ARC_TLS_DTPOFF_S9,	0),
   DEF (dtpoff,  BFD_RELOC_ARC_TLS_DTPOFF,	1),
-  DEF (jli,  BFD_RELOC_ARC_JLI_SECTOFF_SIMM12, 0),
+  DEF (jli,     BFD_RELOC_ARC_JLI_SECTOFF_SIMM12, 0),
 };
 
 static const int arc_num_reloc_op
@@ -997,7 +997,7 @@ debug_exp (expressionS *t)
     case O_tpoff:		namemd = "O_tpoff";		break;
     case O_dtpoff9:		namemd = "O_dtpoff9";		break;
     case O_dtpoff:		namemd = "O_dtpoff";		break;
-    case O_jli:   namemd = "O_jli";    break;
+    case O_jli:			namemd = "O_jli";		break;
     }
 
   pr_debug ("%s (%s, %s, %d, %s)", name,
@@ -1513,6 +1513,7 @@ generic_reloc_p (extended_bfd_reloc_code_real_type reloc)
     case BFD_RELOC_ARC_SDA16_LD2:
     case BFD_RELOC_ARC_SDA16_ST2:
     case BFD_RELOC_ARC_SDA32_ME:
+    case BFD_RELOC_ARC_JLI_SECTOFF_SIMM12:
       return FALSE;
     default:
       return TRUE;
@@ -1889,9 +1890,7 @@ find_opcode_match (const struct arc_opcode_hash_entry *entry,
 		    {
 		    case O_jli:
 		      if (!(operand->flags & ARC_OPERAND_SIGNED))
-		      {
-		        goto match_failed;
-		      }
+			goto match_failed;
 		      break;
 		    case O_gotoff:
 		    case O_gotpc:
