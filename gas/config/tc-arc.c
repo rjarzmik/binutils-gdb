@@ -4047,8 +4047,6 @@ arc_cons_fix_new (fragS *frag,
 		  expressionS *exp,
 		  bfd_reloc_code_real_type r_type)
 {
-  r_type = BFD_RELOC_UNUSED;
-
   switch (size)
     {
     case 1:
@@ -4064,8 +4062,11 @@ arc_cons_fix_new (fragS *frag,
       break;
 
     case 4:
-      r_type = BFD_RELOC_32;
-      arc_check_reloc (exp, &r_type);
+      if (r_type != BFD_RELOC_ARC_JLI_32)
+	{
+	  r_type = BFD_RELOC_32;
+	  arc_check_reloc (exp, &r_type);
+	}
       break;
 
     case 8:
@@ -4697,6 +4698,40 @@ arc_extcorereg (int opertype)
       break;
     }
   create_extcore_section (&ereg, opertype);
+}
+
+/* Implement TC_PARSE_CONS_EXPRESSION to handle @symb@jli.  */
+
+bfd_reloc_code_real_type
+arc_parse_cons_expression (expressionS *exp, int size)
+{
+  bfd_reloc_code_real_type ret = BFD_RELOC_NONE;
+
+  SKIP_WHITESPACE ();
+  /* Parse whatever is there.  */
+  expression (exp);
+
+  if (size != 4)
+    return ret;
+
+  /* Check if we have a JLI modifier.  */
+  if ((*input_line_pointer == '@')
+      && (exp->X_op == O_symbol))
+    {
+      /* Parse @relocation_type.  */
+      input_line_pointer++;
+      if (strncasecmp (input_line_pointer, "jli", 3) != 0)
+	{
+	  as_bad (_("@jli relocation operand required"));
+	  return ret;
+	}
+      exp->X_md = O_jli;
+      debug_exp (exp);
+      ret = BFD_RELOC_ARC_JLI_32;
+      input_line_pointer += 3;
+    }
+
+  return ret;
 }
 
 /* Local variables:
