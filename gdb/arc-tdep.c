@@ -28,13 +28,13 @@
 #include "gdbcore.h"
 #include "gdbcmd.h"
 #include "objfiles.h"
+#include "prologue-value.h"
 #include "trad-frame.h"
 
 /* ARC header files.  */
 #include "opcode/arc.h"
 #include "arc-tdep.h"
 #include "arch/arc-insn.h"
-#include "dis-asm.h"
 
 /* Standard headers.  */
 #include <algorithm>
@@ -43,8 +43,7 @@
 #include "features/arc-v2.c"
 #include "features/arc-arcompact.c"
 
-/* The frame unwind cache for the ARC.  Current structure is a stub, because
-   it should be filled in during the prologue analysis.  */
+/* The frame unwind cache for ARC.  */
 
 struct arc_frame_cache
 {
@@ -53,7 +52,35 @@ struct arc_frame_cache
      frame.  */
   CORE_ADDR prev_sp;
 
-  /* Store addresses for registers saved in prologue.  */
+  /* Register that is a base for this frame - FP for normal frame, SP for
+     non-FP frames.  */
+  int frame_base_reg;
+
+  /* Offset from the previous SP to the current frame base.  If GCC uses
+     `SUB SP,SP,offset` to allocate space for local variables, then it will be
+     done after setting up a frame pointer, but it still will be considered
+     part of prologue, therefore SP will be lesser than FP at the end of the
+     prologue analysis.  In this case that would be an offset from old SP to a
+     new FP.  But in case of non-FP frames, frame base is an SP and thus that
+     would be an offset from old SP to new SP.  What is important is that this
+     is an offset from old SP to a known register, so it can be used to find
+     old SP.
+
+     Using FP is preferable, when possible, because SP can change in function
+     body after prologue due to alloca, variadic arguments or other shenanigans.
+     If that is the case in the caller frame then PREV_SP will point to SP at
+     the moment of function call, but it will be different from SP value at the
+     end of the caller prologue.  As a result it will not be possible to
+     reconstruct caller's frame and go past it in the backtrace.  Those things
+     are unlikely to happen to FP - FP value at the moment of function call (as
+     stored on stack in callee prologue) is also an FP value at the end of the
+     caller's prologue.  */
+
+  LONGEST frame_base_offset;
+
+  /* Store addresses for registers saved in prologue.  During prologue analysis
+     we store offsets relatively to "old SP", then after old SP is evaluated,
+     offsets are replaced with absolute addresses.  */
   struct trad_frame_saved_reg *saved_regs;
 };
 
@@ -117,6 +144,10 @@ static const char *const core_arcompact_register_names[] = {
   "r56", "r57", "r58", "r59",
   "lp_count", "reserved", "limm", "pcl",
 };
+
+/* Functions are sorted in the order as they are used in the
+   _initialize_arc_tdep (), which uses the same order as gdbarch.h.  Static
+   functions are defined before the first invocation.  */
 
 /* Implement the "write_pc" gdbarch method.
 
@@ -615,6 +646,367 @@ arc_frame_base_address (struct frame_info *this_frame, void **prologue_cache)
   return (CORE_ADDR) get_frame_register_unsigned (this_frame, ARC_FP_REGNUM);
 }
 
+/* Helper function that returns valid pv_t for an instruction operand:
+   either a register or a constant.  */
+
+static pv_t
+arc_pv_get_operand (pv_t *regs, const struct arc_instruction &insn, int operand)
+{
+  if (arc_insn_operand_is_reg (insn, operand))
+    return regs[arc_insn_get_operand_reg (insn, operand)];
+  else
+    return pv_constant (arc_insn_get_operand_value (insn, operand));
+}
+
+/* Determine whether the given disassembled instruction may be part of a
+   function prologue.  If it is, the information in the frame unwind cache will
+   be updated.  */
+
+static int
+arc_is_in_prologue (struct gdbarch *gdbarch, const struct arc_instruction &insn,
+		    pv_t *regs, struct pv_area *stack)
+{
+  /* Disassembler returns dis_noninsn if it cannot decode an instruction at
+     specified address.  It likely means that address points to a data,
+     non-initialized memory, or middle of a 32-bit instruction.  In practice
+     this may happen if GDB connects to a remote target that has non-zeroed
+     memory.  GDB would read PC value and would try to analyze prologue, but
+     there is no guarantee that memory contents at the address specified in PC
+     is address is a valid instruction.  There is not much that we can do about
+     this.  */
+  if (insn.insn_type == dis_noninsn)
+    return FALSE;
+
+  /* Branch/jump or a predicated instruction.  */
+  if (insn.is_control_flow || insn.condition_code != ARC_CC_AL)
+    return FALSE;
+
+  /* Store of some register.  May or may not update base address register.  */
+  if (arc_insn_is_st (insn) || arc_insn_is_push_s (insn))
+    {
+      /* There is definetely at least one operand - register/value being
+	 stored.  */
+      gdb_assert (arc_insn_count_operands (insn) > 0);
+
+      /* Store at some constant address.  */
+      if (arc_insn_count_operands (insn) > 1
+	  && !arc_insn_operand_is_reg (insn, 1))
+	return FALSE;
+
+      /* Writeback modes:
+	 Mode	Address used		    Writeback value
+	 --------------------------------------------------
+	 No	reg + offset		    no
+	 A/AW	reg + offset		    reg + offset
+	 AB	reg			    reg + offset
+	 AS	reg + (offset << scaling)   no
+       */
+
+      /* Register with base memory address.  */
+      int base_reg = arc_insn_get_memory_base_reg (insn);
+
+      /* Address where to write.  arc_insn_get_memory_offset returns scaled
+	 value for ARC_WRITABACK_AS.  */
+      pv_t addr;
+      if (insn.writeback_mode == ARC_WRITEBACK_AB)
+	addr = regs[base_reg];
+      else
+	addr = pv_add_constant (regs[base_reg],
+				arc_insn_get_memory_offset (insn));
+
+      if (pv_area_store_would_trash (stack, addr))
+	return FALSE;
+
+      if (insn.data_size_mode != ARC_SCALING_D)
+	{
+	  /* Find the value being stored.  */
+	  pv_t store_value = arc_pv_get_operand (regs, insn, 0);
+
+	  /* What is the size of a the stored value?  */
+	  CORE_ADDR size;
+	  if (insn.data_size_mode == ARC_SCALING_B)
+	    size = 1;
+	  else if (insn.data_size_mode == ARC_SCALING_H)
+	    size = 2;
+	  else
+	    size = ARC_REGISTER_SIZE;
+
+	  pv_area_store (stack, addr, size, store_value);
+	}
+      else
+	{
+	  if (arc_insn_operand_is_reg (insn, 0))
+	    {
+	      /* If this is a double store, than write N+1 register as well.  */
+	      pv_t store_value1 = regs[arc_insn_get_operand_reg (insn, 0)];
+	      pv_t store_value2 = regs[arc_insn_get_operand_reg (insn, 0) + 1];
+	      pv_area_store (stack, addr, ARC_REGISTER_SIZE, store_value1);
+	      pv_area_store (stack,
+			     pv_add_constant (addr, ARC_REGISTER_SIZE),
+			     ARC_REGISTER_SIZE, store_value2);
+	    }
+	  else
+	    {
+	      pv_t store_value = pv_constant (arc_insn_get_operand_value (insn, 0));
+	      pv_area_store (stack, addr, ARC_REGISTER_SIZE * 2, store_value);
+	    }
+	}
+
+      /* Do we need to update base register?  */
+      if (insn.writeback_mode == ARC_WRITEBACK_A
+	  || insn.writeback_mode == ARC_WRITEBACK_AB)
+	regs[base_reg] = pv_add_constant (regs[base_reg],
+					  arc_insn_get_memory_offset (insn));
+
+      return TRUE;
+    }
+  else if (arc_insn_is_mov (insn))
+    {
+      gdb_assert (arc_insn_count_operands (insn) == 2);
+
+      /* Destination argument can be "0", so nothing will happen.  */
+      if (arc_insn_operand_is_reg (insn, 0))
+	{
+	  int dst_regnum = arc_insn_get_operand_reg (insn, 0);
+	  regs[dst_regnum] = arc_pv_get_operand (regs, insn, 1);
+	}
+      return TRUE;
+    }
+  else if (arc_insn_is_sub (insn))
+    {
+      gdb_assert (arc_insn_count_operands (insn) == 3);
+
+      /* SUB 0,b,c.  */
+      if (!arc_insn_operand_is_reg (insn, 0))
+	return TRUE;
+
+      int dst_regnum = arc_insn_get_operand_reg (insn, 0);
+      regs[dst_regnum] = pv_subtract (arc_pv_get_operand (regs, insn, 1),
+				      arc_pv_get_operand (regs, insn, 2));
+      return TRUE;
+    }
+  else if (arc_insn_is_enter_s (insn))
+    {
+      /* ENTER_S is a prologue-in-instruction - it saves all callee-saved
+	 registers according to given arguments thus greatly reducing code
+	 size.
+
+	 ENTER_S {R13-...,BLINK[,FP]} stores registers in following order:
+
+	 new SP ->
+		   BLINK
+		   R13
+		   R14
+		   R15
+		   ...
+		   FP
+	 old SP ->
+       */
+
+      gdb_assert (arc_insn_count_operands (insn) == 3);
+
+      /* There are three arguments for this opcode, as presented by ARC
+	 disassembler:
+	 1) amount of general-purpose registers to be saved;
+	 2) FP register number (27) if FP has to be stored;
+	 3) BLINK register number (31) if BLINK has to be stored.  */
+      int regs_saved = arc_insn_get_operand_value (insn, 0);
+      int is_fp_saved = (arc_insn_get_operand_reg (insn, 1) == ARC_FP_REGNUM);
+      int is_blink_saved
+	= (arc_insn_get_operand_reg (insn, 2) == ARC_BLINK_REGNUM);
+
+      /* Amount of bytes to be allocated to store specified registers.  */
+      CORE_ADDR st_size = ((regs_saved + is_fp_saved + is_blink_saved) << 2);
+      pv_t new_sp = pv_add_constant (regs[ARC_SP_REGNUM], -st_size);
+
+      /* Assume that if we can write the last register (closest to new SP),
+	 then we can write all of them.  */
+      if (pv_area_store_would_trash (stack, new_sp))
+	return FALSE;
+
+      /* Current store address.  */
+      pv_t addr = regs[ARC_SP_REGNUM];
+
+      if (is_fp_saved)
+	{
+	  addr = pv_add_constant (addr, -ARC_REGISTER_SIZE);
+	  pv_area_store (stack, addr, ARC_REGISTER_SIZE, regs[ARC_FP_REGNUM]);
+	}
+
+      /* Registers are stored in backward order: from GP (R26) to R13.  */
+      for (int i = ARC_R13_REGNUM + regs_saved - 1; i >= ARC_R13_REGNUM; i--)
+	{
+	  addr = pv_add_constant (addr, -ARC_REGISTER_SIZE);
+	  pv_area_store (stack, addr, ARC_REGISTER_SIZE, regs[i]);
+	}
+
+      if (is_blink_saved)
+	{
+	  addr = pv_add_constant (addr, -ARC_REGISTER_SIZE);
+	  pv_area_store (stack, addr, ARC_REGISTER_SIZE,
+			 regs[ARC_BLINK_REGNUM]);
+	}
+
+      gdb_assert (pv_is_identical (addr, new_sp));
+
+      regs[ARC_SP_REGNUM] = new_sp;
+
+      if (is_fp_saved)
+	regs[ARC_FP_REGNUM] = regs[ARC_SP_REGNUM];
+
+      return TRUE;
+    }
+
+  /* Some other architectures, like nds32 or arm, try to continue as far as
+     possible when building a prologue cache (as opposed to when skipping
+     prologue), so that cache will be as full as possible.  However current
+     code for ARC doesn't recognize some instructions that may modify SP, like
+     ADD, AND, OR, etc, hence there is no way to guarantee that SP wasn't
+     clobbered by the skipped instruction.  Potential existence of extension
+     instruction that may do anything they want makes this even more complex,
+     so it is just better to halt on a first unrecognized instructions.  */
+
+  return FALSE;
+}
+
+/* Analyze the prologue and update the corresponding frame cache for the frame
+   unwinder for unwinding frames that doesn't have debug info.  In such
+   situation GDB attempts to parse instructions in the prologue to understand
+   where each register is saved.
+
+   If CACHE is not NULL, then it will be filled with information about saved
+   registers.
+
+   There are several variations of prologue which we may encouter.  "Full"
+   prologue looks like this:
+
+	sub	sp,sp,<imm>   ; Space for variadic arguments.
+	push	blink	      ; Store return address.
+	push	r13	      ; Store callee saved registers (up to R26/GP).
+	push	r14
+	push	fp	      ; Store frame pointer.
+	mov	fp,sp	      ; Update frame pointer.
+	sub	sp,sp,<imm>   ; Create space for local vars on the stack.
+
+   Depending on compiler options lots of things may change:
+
+    1) BLINK is not saved in leaf functions.
+    2) Frame pointer is not saved and updated if -fomit-frame-pointer is used.
+    3) 16-bit versions of those instructions may be used.
+    4) Instead of a sequence of several push'es, compiler may instead prefer to
+    do one subtract on stack pointer and then store registers using normal
+    store, that doesn't update SP.  Like this:
+
+
+	sub	sp,sp,8		; Create space for calee-saved registers.
+	st	r13,[sp,4]      ; Store callee saved registers (up to R26/GP).
+	st	r14,[sp,0]
+
+    5) ENTER_S instruction can encode most of prologue sequence in one
+    instruction (except for those subtracts for variadic arguments and local
+    variables).
+    6) GCC may use "millicode" functions from libgcc to store callee-saved
+    registers with minimal code-size requirements.  This function currently
+    doesn't support this.
+
+   ENTRYPOINT is a function entry point where prologue starts.
+
+   LIMIT_PC is a maximum possible end address of prologue (meaning address
+   of first instruction after the prologue).  It might also point to the middle
+   of prologue if execution has been stopped by the breakpoint at this address
+   - in this case debugger should analyze prologue only up to this address,
+   because further instructions haven't been executed yet.
+
+   Returns address of the first instruction after the prologue.  */
+
+static CORE_ADDR
+arc_analyze_prologue (struct gdbarch *gdbarch, const CORE_ADDR entrypoint,
+		      const CORE_ADDR limit_pc, struct arc_frame_cache *cache)
+{
+  if (arc_debug)
+    debug_printf ("arc: analyze_prologue (entrypoint=%s, limit_pc=%s)\n",
+		  paddress (gdbarch, entrypoint),
+		  paddress (gdbarch, limit_pc));
+
+  /* Prologue values.  Only core registers can be stored.  */
+  pv_t regs[ARC_LAST_CORE_REGNUM + 1];
+  for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)
+    regs[i] = pv_register (i, 0);
+  struct pv_area *stack = make_pv_area (ARC_SP_REGNUM,
+					gdbarch_addr_bit (gdbarch));
+  struct cleanup *back_to = make_cleanup_free_pv_area (stack);
+
+  CORE_ADDR current_prologue_end = entrypoint;
+
+  /* Look at each instruction in the prologue.  */
+  while (current_prologue_end < limit_pc)
+    {
+      struct arc_instruction insn;
+      arc_insn_decode (gdbarch, current_prologue_end, &insn);
+
+      if (arc_debug >= 2)
+	arc_insn_dump (insn);
+
+      /* If this instruction is in the prologue, fields in the cache will be
+	 updated, and the saved registers mask may be updated.  */
+      if (!arc_is_in_prologue (gdbarch, insn, regs, stack))
+	{
+	  /* Found an instruction that is not in the prologue.  */
+	  if (arc_debug)
+	    debug_printf ("arc: End of prologue reached at address %s\n",
+			  paddress (gdbarch, insn.address));
+	  break;
+	}
+
+      current_prologue_end = arc_insn_get_linear_next_pc (insn);
+    }
+
+  if (cache != NULL)
+    {
+      /* Figure out if we have frame pointer or just a stack pointer.  */
+      if (pv_is_register (regs[ARC_FP_REGNUM], ARC_SP_REGNUM))
+	{
+	  cache->frame_base_reg = ARC_FP_REGNUM;
+	  cache->frame_base_offset = -regs[ARC_FP_REGNUM].k;
+	}
+      else
+	{
+	  cache->frame_base_reg = ARC_SP_REGNUM;
+	  cache->frame_base_offset = -regs[ARC_SP_REGNUM].k;
+	}
+
+      /* Assign offset from old SP to all saved registers.  */
+      for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)
+	{
+	  CORE_ADDR offset;
+	  if (pv_area_find_reg (stack, gdbarch, i, &offset))
+	    cache->saved_regs[i].addr = offset;
+	}
+    }
+
+  do_cleanups (back_to);
+  return current_prologue_end;
+}
+
+/* Estimated maximum prologue length in bytes.  This should include:
+   1) Store instruction for each callee-saved register (R25 - R13 + 1)
+   2) Two instructions for FP
+   3) One for BLINK
+   4) Three substract instructions for SP (for variadic args, for
+   callee saved regs and for local vars) and assuming that those SUB use
+   long-immediate (hence double length).
+   5) Stores of arguments registers are considered part of prologue too
+      (R7 - R1 + 1).
+   This is quite an extreme case, because even with -O0 GCC will collapse first
+   two SUBs into one and long immediate values are quite unlikely to appear in
+   this case, but still better to overshoot a bit - prologue analysis will
+   anyway stop at the first instruction that doesn't fit prologue, so this
+   limit will be rarely reached.  */
+
+const static int MAX_PROLOGUE_LENGTH
+  = 4 * (ARC_R25_REGNUM - ARC_R13_REGNUM + 1 + 2 + 1 + 6
+	 + ARC_LAST_ARG_REGNUM - ARC_FIRST_ARG_REGNUM + 1);
+
 /* Implement the "skip_prologue" gdbarch method.
 
    Skip the prologue for the function at PC.  This is done by checking from
@@ -644,15 +1036,19 @@ arc_skip_prologue (struct gdbarch *gdbarch, CORE_ADDR pc)
   /* No prologue info in symbol table, have to analyze prologue.  */
 
   /* Find an upper limit on the function prologue using the debug
-     information.  If the debug information could not be used to provide that
-     bound, then pass 0 and arc_scan_prologue will estimate value itself.  */
+     information.  If there is no debug information about prologue end, then
+     skip_prologue_using_sal will return 0.  */
   CORE_ADDR limit_pc = skip_prologue_using_sal (gdbarch, pc);
-  /* We don't have a proper analyze_prologue function yet, but its result
-     should be returned here.  Currently GDB will just stop at the first
-     instruction of function if debug information doesn't have prologue info;
-     and if there is a debug info about prologue - this code path will not be
-     taken at all.  */
-  return (limit_pc == 0 ? pc : limit_pc);
+
+  /* If there is no debug information at all, it is required to give some
+     semi-arbitrary hard limit on amount of bytes to scan during prologue
+     analysis.  */
+  if (limit_pc == 0)
+    limit_pc = pc + MAX_PROLOGUE_LENGTH;
+
+  /* Find the address of the first instruction after the prologue by scanning
+     through it - no other information is needed, so pass NULL as a cache.  */
+  return arc_analyze_prologue (gdbarch, pc, limit_pc, NULL);
 }
 
 /* Implement the "print_insn" gdbarch method.
@@ -796,6 +1192,28 @@ arc_frame_align (struct gdbarch *gdbarch, CORE_ADDR sp)
   return align_down (sp, 4);
 }
 
+/* Dump the frame info.  Used for internal debugging only.  */
+
+static void
+arc_print_frame_cache (struct gdbarch *gdbarch, char *message,
+		       struct arc_frame_cache *cache, int addresses_known)
+{
+  debug_printf ("arc: frame_info %s\n", message);
+  debug_printf ("arc: prev_sp = %s\n", paddress (gdbarch, cache->prev_sp));
+  debug_printf ("arc: frame_base_reg = %i\n", cache->frame_base_reg);
+  debug_printf ("arc: frame_base_offset = %s\n",
+		plongest (cache->frame_base_offset));
+
+  for (int i = 0; i <= ARC_BLINK_REGNUM; i++)
+    {
+      if (trad_frame_addr_p (cache->saved_regs, i))
+	debug_printf ("arc: saved register %s at %s %s\n",
+		      gdbarch_register_name (gdbarch, i),
+		      (addresses_known) ? "address" : "offset",
+		      paddress (gdbarch, cache->saved_regs[i].addr));
+    }
+}
+
 /* Frame unwinder for normal frames.  */
 
 static struct arc_frame_cache *
@@ -807,12 +1225,11 @@ arc_make_frame_cache (struct frame_info *this_frame)
   struct gdbarch *gdbarch = get_frame_arch (this_frame);
 
   CORE_ADDR block_addr = get_frame_address_in_block (this_frame);
-  CORE_ADDR prev_pc = get_frame_pc (this_frame);
-
   CORE_ADDR entrypoint, prologue_end;
   if (find_pc_partial_function (block_addr, NULL, &entrypoint, &prologue_end))
     {
       struct symtab_and_line sal = find_pc_line (entrypoint, 0);
+      CORE_ADDR prev_pc = get_frame_pc (this_frame);
       if (sal.line == 0)
 	/* No line info so use current PC.  */
 	prologue_end = prev_pc;
@@ -824,18 +1241,42 @@ arc_make_frame_cache (struct frame_info *this_frame)
     }
   else
     {
+      /* If find_pc_partial_function returned nothing then there is no symbol
+	 information at all for this PC.  Currently we assume in this case that
+	 current PC is entrypoint to function and try to construct the frame
+	 from that.  This is, probably, suboptimal, for example ARM assumes in
+	 this case that we are inside the normal frame (with frame pointer).
+	 ARC, perhaps, should try to do the same.  */
       entrypoint = get_frame_register_unsigned (this_frame,
 						gdbarch_pc_regnum (gdbarch));
-      prologue_end = 0;
+      prologue_end = entrypoint + MAX_PROLOGUE_LENGTH;
     }
 
   /* Allocate new frame cache instance and space for saved register info.
-   * FRAME_OBSTACK_ZALLOC will initialize fields to zeroes.  */
+     FRAME_OBSTACK_ZALLOC will initialize fields to zeroes.  */
   struct arc_frame_cache *cache
     = FRAME_OBSTACK_ZALLOC (struct arc_frame_cache);
   cache->saved_regs = trad_frame_alloc_saved_regs (this_frame);
 
-  /* Should call analyze_prologue here, when it will be implemented.  */
+  arc_analyze_prologue (gdbarch, entrypoint, prologue_end, cache);
+
+  if (arc_debug)
+    arc_print_frame_cache (gdbarch, "after prologue", cache, FALSE);
+
+  CORE_ADDR unwound_fb = get_frame_register_unsigned (this_frame,
+						      cache->frame_base_reg);
+  if (unwound_fb == 0)
+    return cache;
+  cache->prev_sp = unwound_fb + cache->frame_base_offset;
+
+  for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)
+    {
+      if (trad_frame_addr_p (cache->saved_regs, i))
+	cache->saved_regs[i].addr += cache->prev_sp;
+    }
+
+  if (arc_debug)
+    arc_print_frame_cache (gdbarch, "after previous SP found", cache, TRUE);
 
   return cache;
 }
