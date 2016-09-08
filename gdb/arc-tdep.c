@@ -86,7 +86,7 @@ static const char *const core_v2_register_names[] = {
   "r48", "r49", "r50", "r51",
   "r52", "r53", "r54", "r55",
   "r56", "r57", "accl", "acch",
-  "lp_count", "pcl",
+  "lp_count", "reserved", "limm", "pcl",
 };
 
 static const char *const aux_minimal_register_names[] = {
@@ -109,7 +109,7 @@ static const char *const core_arcompact_register_names[] = {
   "r48", "r49", "r50", "r51",
   "r52", "r53", "r54", "r55",
   "r56", "r57", "r58", "r59",
-  "lp_count", "pcl",
+  "lp_count", "reserved", "limm", "pcl",
 };
 
 /* Implement the "write_pc" gdbarch method.
