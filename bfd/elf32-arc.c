@@ -1866,11 +1866,6 @@ plt_do_relocs_for_symbol (bfd *abfd,
 		  = htab->sgotplt->output_section->vma
 		    + htab->sgotplt->output_offset + symbol_got_offset;
 		break;
-	  case SGLOBAL_OFFSET_TABLE:
-		relocation
-		  = htab->sgot->output_section->vma
-		    + htab->sgot->output_offset + symbol_got_offset;
-		break;
 	}
       relocation += reloc->addend;
 

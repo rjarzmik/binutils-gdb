@@ -35,7 +35,6 @@ enum plt_reloc_symbol
   LAST_RELOC = 0,
 
   SGOT = 1,
-  SGLOBAL_OFFSET_TABLE = 2,
 
   RELATIVE = (1 << 8),
   RELATIVE_INSN_32 = (1 << 9),
