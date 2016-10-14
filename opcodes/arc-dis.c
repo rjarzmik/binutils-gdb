@@ -70,6 +70,33 @@ struct arc_operand_iterator
   } state;
 };
 
+/* A private data used by ARC decoder.  */
+struct arc_disassemble_info
+{
+  /* The current disassembled arc opcode.  */
+  const struct arc_opcode *opcode;
+
+  /* Instruction length w/o limm field.  */
+  unsigned insn_len;
+
+  /* TRUE if we have limm.  */
+  bfd_boolean limm_p;
+
+  /* LIMM value, if exists.  */
+  unsigned long limm;
+
+  /* Condition code, if exists.  */
+  unsigned condition_code;
+
+  /* Writeback mode.  */
+  unsigned writeback_mode;
+
+  /* Number of operands.  */
+  unsigned operands_count;
+
+  struct arc_insn_operand operands[ARC_MAX_OPERAND_COUNT];
+};
+
 /* Globals variables.  */
 
 static const char * const regnames[64] =
@@ -128,6 +155,20 @@ static linkclass decodelist = NULL;
 #define OPCODE_AC(word)   (BITS ((word), 11, 15))
 
 /* Functions implementation.  */
+
+/* Initialize private data.  */
+static bfd_boolean
+init_arc_disasm_info (struct disassemble_info *info)
+{
+  struct arc_disassemble_info *arc_infop
+    = calloc (sizeof (*arc_infop), 1);
+
+  if (arc_infop == NULL)
+    return FALSE;
+
+  info->private_data = arc_infop;
+  return TRUE;
+}
 
 /* Add a new element to the decode list.  */
 
@@ -220,9 +261,9 @@ special_flag_p (const char *opname,
 static const struct arc_opcode *
 find_format_from_table (struct disassemble_info *info,
 			const struct arc_opcode *arc_table,
-                        unsigned *insn,
+			unsigned *insn,
 			unsigned int insn_len,
-                        unsigned isa_mask,
+			unsigned isa_mask,
 			bfd_boolean *has_limm,
 			bfd_boolean overlaps)
 {
@@ -363,10 +404,10 @@ find_format_from_table (struct disassemble_info *info,
 
 static const struct arc_long_opcode *
 find_format_long_instructions (unsigned *insn,
-                               unsigned int *insn_len,
-                               unsigned isa_mask,
-                               bfd_vma memaddr,
-                               struct disassemble_info *info)
+			       unsigned int *insn_len,
+			       unsigned isa_mask,
+			       bfd_vma memaddr,
+			       struct disassemble_info *info)
 {
   unsigned int i;
   unsigned limm = 0;
@@ -381,39 +422,39 @@ find_format_long_instructions (unsigned *insn,
       opcode = &arc_long_opcodes[i].base_opcode;
 
       if (ARC_SHORT (opcode->mask) && (*insn_len == 2))
-        {
-          if (OPCODE_AC (opcode->opcode) != OPCODE_AC (insn[0]))
-            continue;
-        }
+	{
+	  if (OPCODE_AC (opcode->opcode) != OPCODE_AC (insn[0]))
+	    continue;
+	}
       else if (!ARC_SHORT (opcode->mask) && (*insn_len == 4))
-        {
-          if (OPCODE (opcode->opcode) != OPCODE (insn[0]))
-            continue;
-        }
+	{
+	  if (OPCODE (opcode->opcode) != OPCODE (insn[0]))
+	    continue;
+	}
       else
-        continue;
+	continue;
 
       if ((insn[0] ^ opcode->opcode) & opcode->mask)
-        continue;
+	continue;
 
       if (!(opcode->cpu & isa_mask))
-        continue;
+	continue;
 
       if (!limm_loaded)
-        {
-          status = (*info->read_memory_func) (memaddr + *insn_len, buffer,
-                                              4, info);
-          if (status != 0)
-            return NULL;
+	{
+	  status = (*info->read_memory_func) (memaddr + *insn_len, buffer,
+					      4, info);
+	  if (status != 0)
+	    return NULL;
 
-          limm = ARRANGE_ENDIAN (info, buffer);
-          limm_loaded = TRUE;
-        }
+	  limm = ARRANGE_ENDIAN (info, buffer);
+	  limm_loaded = TRUE;
+	}
 
       /* Check the second word using the mask and template.  */
       if ((limm & arc_long_opcodes[i].limm_mask)
-          != arc_long_opcodes[i].limm_template)
-        continue;
+	  != arc_long_opcodes[i].limm_template)
+	continue;
 
       (*insn_len) += 4;
       insn[1] = limm;
@@ -451,14 +492,15 @@ static bfd_boolean
 find_format (bfd_vma                       memaddr,
 	     unsigned *                    insn,
 	     unsigned int *                insn_len,
-             unsigned                      isa_mask,
+	     unsigned                      isa_mask,
 	     struct disassemble_info *     info,
-             const struct arc_opcode **    opcode_result,
-             struct arc_operand_iterator * iter)
+	     const struct arc_opcode **    opcode_result,
+	     struct arc_operand_iterator * iter)
 {
   const struct arc_opcode *opcode = NULL;
   bfd_boolean needs_limm;
   const extInstruction_t *einsn, *i;
+  struct arc_disassemble_info *arc_infop = info->private_data;
 
   /* First, try the extension instructions.  */
   einsn = arcExtMap_insn (OPCODE (insn[0]), insn[0]);
@@ -490,16 +532,16 @@ An error occured while generating the extension instruction operations");
       int status;
 
       status = (*info->read_memory_func) (memaddr + *insn_len, buffer,
-                                          4, info);
+					  4, info);
       if (status != 0)
-        {
-          opcode = NULL;
-        }
+	{
+	  opcode = NULL;
+	}
       else
-        {
-          insn[1] = ARRANGE_ENDIAN (info, buffer);
-          *insn_len += 4;
-        }
+	{
+	  insn[1] = ARRANGE_ENDIAN (info, buffer);
+	  *insn_len += 4;
+	}
     }
 
   if (opcode == NULL)
@@ -508,20 +550,20 @@ An error occured while generating the extension instruction operations");
 
       /* No instruction found yet, try the long instructions.  */
       long_opcode =
-        find_format_long_instructions (insn, insn_len, isa_mask,
-                                       memaddr, info);
+	find_format_long_instructions (insn, insn_len, isa_mask,
+				       memaddr, info);
 
       if (long_opcode != NULL)
-        {
-          iter->mode = OPERAND_ITERATOR_LONG;
-          iter->insn = insn;
-          iter->state.long_insn.long_opcode = long_opcode;
-          iter->state.long_insn.opidx_base =
-            long_opcode->base_opcode.operands;
-          iter->state.long_insn.opidx_limm =
-            long_opcode->operands;
-          opcode = &long_opcode->base_opcode;
-        }
+	{
+	  iter->mode = OPERAND_ITERATOR_LONG;
+	  iter->insn = insn;
+	  iter->state.long_insn.long_opcode = long_opcode;
+	  iter->state.long_insn.opidx_base =
+	    long_opcode->base_opcode.operands;
+	  iter->state.long_insn.opidx_limm =
+	    long_opcode->operands;
+	  opcode = &long_opcode->base_opcode;
+	}
     }
   else
     {
@@ -532,6 +574,11 @@ An error occured while generating the extension instruction operations");
     }
 
   *opcode_result = opcode;
+
+  arc_infop->opcode = opcode;
+  arc_infop->limm = (needs_limm) ? insn[1] : 0;
+  arc_infop->limm_p = needs_limm;
+
   return TRUE;
 }
 
@@ -542,6 +589,7 @@ print_flags (const struct arc_opcode *opcode,
 {
   const unsigned char *flgidx;
   unsigned int value;
+  struct arc_disassemble_info *arc_infop = info->private_data;
 
   /* Now extract and print the flags.  */
   for (flgidx = opcode->flags; *flgidx; flgidx++)
@@ -606,7 +654,12 @@ print_flags (const struct arc_opcode *opcode,
 		    info->insn_type = dis_condjsr;
 		  else if (info->insn_type == dis_branch)
 		    info->insn_type = dis_condbranch;
+		  arc_infop->condition_code = flg_operand->code;
 		}
+
+	      /* Check for the write back modes.  */
+	      if (cl_flags->flag_class & F_CLASS_WB)
+		arc_infop->writeback_mode = flg_operand->code;
 
 	      (*info->fprintf_func) (info->stream, "%s", flg_operand->name);
 	    }
@@ -678,12 +731,12 @@ arc_insn_length (bfd_byte msb, bfd_byte lsb, struct disassemble_info *info)
 	 but, if they ever do then we might need to start carrying
 	 information around in the elf about which extensions are in use.  */
       if (major_opcode == 0xb)
-        {
-          bfd_byte minor_opcode = lsb & 0x1f;
+	{
+	  bfd_byte minor_opcode = lsb & 0x1f;
 
-          if (minor_opcode < 4)
-            return 2;
-        }
+	  if (minor_opcode < 4)
+	    return 2;
+	}
       /* Fall through.  */
     case bfd_mach_arc_arc600:
       return (major_opcode > 0xb) ? 2 : 4;
@@ -714,25 +767,25 @@ extract_operand_value (const struct arc_operand *operand, unsigned *insn)
   else
     {
       if (operand->extract)
-        value = (*operand->extract) (insn[0], (int *) NULL);
+	value = (*operand->extract) (insn[0], (int *) NULL);
       else
-        {
-          if (operand->flags & ARC_OPERAND_ALIGNED32)
-            {
-              value = (insn[0] >> operand->shift)
-                & ((1 << (operand->bits - 2)) - 1);
-              value = value << 2;
-            }
-          else
-            {
-              value = (insn[0] >> operand->shift) & ((1 << operand->bits) - 1);
-            }
-          if (operand->flags & ARC_OPERAND_SIGNED)
-            {
-              int signbit = 1 << (operand->bits - 1);
-              value = (value ^ signbit) - signbit;
-            }
-        }
+	{
+	  if (operand->flags & ARC_OPERAND_ALIGNED32)
+	    {
+	      value = (insn[0] >> operand->shift)
+		& ((1 << (operand->bits - 2)) - 1);
+	      value = value << 2;
+	    }
+	  else
+	    {
+	      value = (insn[0] >> operand->shift) & ((1 << operand->bits) - 1);
+	    }
+	  if (operand->flags & ARC_OPERAND_SIGNED)
+	    {
+	      int signbit = 1 << (operand->bits - 1);
+	      value = (value ^ signbit) - signbit;
+	    }
+	}
     }
 
   return value;
@@ -746,16 +799,16 @@ extract_operand_value (const struct arc_operand *operand, unsigned *insn)
 
 static bfd_boolean
 operand_iterator_next (struct arc_operand_iterator *iter,
-                       const struct arc_operand **operand,
-                       int *value)
+		       const struct arc_operand **operand,
+		       int *value)
 {
   if (iter->mode == OPERAND_ITERATOR_STANDARD)
     {
       if (*iter->state.standard.opidx == 0)
-        {
-          *operand = NULL;
-          return FALSE;
-        }
+	{
+	  *operand = NULL;
+	  return FALSE;
+	}
 
       *operand = &arc_operands[*iter->state.standard.opidx];
       *value = extract_operand_value (*operand, iter->insn);
@@ -767,43 +820,43 @@ operand_iterator_next (struct arc_operand_iterator *iter,
       int value_base, value_limm;
 
       if (*iter->state.long_insn.opidx_limm == 0)
-        {
-          *operand = NULL;
-          return FALSE;
-        }
+	{
+	  *operand = NULL;
+	  return FALSE;
+	}
 
       operand_base = &arc_operands[*iter->state.long_insn.opidx_base];
       operand_limm = &arc_operands[*iter->state.long_insn.opidx_limm];
 
       if (operand_base->flags & ARC_OPERAND_LIMM)
-        {
-          /* We've reached the end of the operand list.  */
-          *operand = NULL;
-          return FALSE;
-        }
+	{
+	  /* We've reached the end of the operand list.  */
+	  *operand = NULL;
+	  return FALSE;
+	}
 
       value_base = value_limm = 0;
       if (!(operand_limm->flags & ARC_OPERAND_IGNORE))
-        {
-          /* This should never happen.  If it does then the use of
-             extract_operand_value below will access memory beyond
-             the insn array.  */
-          assert ((operand_limm->flags & ARC_OPERAND_LIMM) == 0);
+	{
+	  /* This should never happen.  If it does then the use of
+	     extract_operand_value below will access memory beyond
+	     the insn array.  */
+	  assert ((operand_limm->flags & ARC_OPERAND_LIMM) == 0);
 
-          *operand = operand_limm;
-          value_limm = extract_operand_value (*operand, &iter->insn[1]);
-        }
+	  *operand = operand_limm;
+	  value_limm = extract_operand_value (*operand, &iter->insn[1]);
+	}
 
       if (!(operand_base->flags & ARC_OPERAND_IGNORE))
-        {
-          *operand = operand_base;
-          value_base = extract_operand_value (*operand, iter->insn);
-        }
+	{
+	  *operand = operand_base;
+	  value_base = extract_operand_value (*operand, iter->insn);
+	}
 
       /* This is a bit of a fudge.  There's no reason why simply ORing
-         together the two values is the right thing to do, however, for all
-         the cases we currently have, it is the right thing, so, for now,
-         I've put off solving the more complex problem.  */
+	 together the two values is the right thing to do, however, for all
+	 the cases we currently have, it is the right thing, so, for now,
+	 I've put off solving the more complex problem.  */
       *value = value_base | value_limm;
 
       iter->state.long_insn.opidx_base++;
@@ -904,6 +957,7 @@ print_insn_arc (bfd_vma memaddr,
   int value;
   struct arc_operand_iterator iter;
   Elf_Internal_Ehdr *header = NULL;
+  struct arc_disassemble_info *arc_infop;
 
   if (info->disassembler_options)
     {
@@ -912,6 +966,9 @@ print_insn_arc (bfd_vma memaddr,
       /* Avoid repeated parsing of the options.  */
       info->disassembler_options = NULL;
     }
+
+  if (info->private_data == NULL && !init_arc_disasm_info (info))
+    return -1;
 
   memset (&iter, 0, sizeof (iter));
   lowbyte  = ((info->endian == BFD_ENDIAN_LITTLE) ? 1 : 0);
@@ -934,7 +991,7 @@ print_insn_arc (bfd_vma memaddr,
     default:
       isa_mask = ARC_OPCODE_ARCv2EM;
       /* TODO: Perhaps remove defitinion of header since it is only used at
-         this location.  */
+	 this location.  */
       if (header != NULL
 	  && (header->e_flags & EF_ARC_MACH_MSK) == EF_ARC_CPU_ARCV2HS)
 	{
@@ -1020,6 +1077,8 @@ print_insn_arc (bfd_vma memaddr,
 
   insn_len = arc_insn_length (buffer[lowbyte], buffer[highbyte], info);
   pr_debug ("instruction length = %d bytes\n", insn_len);
+  arc_infop = info->private_data;
+  arc_infop->insn_len = insn_len;
 
   switch (insn_len)
     {
@@ -1029,9 +1088,9 @@ print_insn_arc (bfd_vma memaddr,
 
     default:
       /* An unknown instruction is treated as being length 4.  This is
-         possibly not the best solution, but matches the behaviour that was
-         in place before the table based instruction length look-up was
-         introduced.  */
+	 possibly not the best solution, but matches the behaviour that was
+	 in place before the table based instruction length look-up was
+	 introduced.  */
     case 4:
       /* This is a long instruction: Read the remaning 2 bytes.  */
       status = (*info->read_memory_func) (memaddr + 2, &buffer[2], 2, info);
@@ -1062,9 +1121,9 @@ print_insn_arc (bfd_vma memaddr,
   if (!opcode)
     {
       if (insn_len == 2)
-        (*info->fprintf_func) (info->stream, ".long %#04x", insn[0]);
+	(*info->fprintf_func) (info->stream, ".long %#04x", insn[0]);
       else
-        (*info->fprintf_func) (info->stream, ".long %#08x", insn[0]);
+	(*info->fprintf_func) (info->stream, ".long %#08x", insn[0]);
 
       info->insn_type = dis_noninsn;
       return insn_len;
@@ -1111,6 +1170,7 @@ print_insn_arc (bfd_vma memaddr,
 
   need_comma = FALSE;
   open_braket = FALSE;
+  arc_infop->operands_count = 0;
 
   /* Now extract and print the operands.  */
   operand = NULL;
@@ -1129,14 +1189,14 @@ print_insn_arc (bfd_vma memaddr,
 
       if ((operand->flags & ARC_OPERAND_IGNORE)
 	  && (operand->flags & ARC_OPERAND_IR)
-          && value == -1)
+	  && value == -1)
 	continue;
 
       if (operand->flags & ARC_OPERAND_COLON)
-        {
-          (*info->fprintf_func) (info->stream, ":");
-          continue;
-        }
+	{
+	  (*info->fprintf_func) (info->stream, ":");
+	  continue;
+	}
 
       if (need_comma)
 	(*info->fprintf_func) (info->stream, ",");
@@ -1201,12 +1261,12 @@ print_insn_arc (bfd_vma memaddr,
 	    (*info->fprintf_func) (info->stream, "%d", value);
 	}
       else if (operand->flags & ARC_OPERAND_ADDRTYPE)
-        {
-          const char *addrtype = get_addrtype (value);
-          (*info->fprintf_func) (info->stream, "%s", addrtype);
-          /* A colon follow an address type.  */
-          need_comma = FALSE;
-        }
+	{
+	  const char *addrtype = get_addrtype (value);
+	  (*info->fprintf_func) (info->stream, "%s", addrtype);
+	  /* A colon follow an address type.  */
+	  need_comma = FALSE;
+	}
       else
 	{
 	  if (operand->flags & ARC_OPERAND_TRUNCATE
@@ -1224,11 +1284,25 @@ print_insn_arc (bfd_vma memaddr,
 		(*info->fprintf_func) (info->stream, "%#x", value);
 	    }
 	}
-    }
 
-  /* Assign arc_opcode as a private data of disassemble_info to be used by
-     arc_insn_decode().  */
-  info->private_data = (void *) opcode;
+      if (operand->flags & ARC_OPERAND_LIMM)
+	{
+	  arc_infop->operands[arc_infop->operands_count].kind
+	    = ARC_OPERAND_KIND_LIMM;
+	  /* It is not important to have exactly the LIMM indicator
+	     here.  */
+	  arc_infop->operands[arc_infop->operands_count].value = 63;
+	}
+      else
+	{
+	  arc_infop->operands[arc_infop->operands_count].value = value;
+	  arc_infop->operands[arc_infop->operands_count].kind
+	    = (operand->flags & ARC_OPERAND_IR
+	       ? ARC_OPERAND_KIND_REG
+	       : ARC_OPERAND_KIND_SHIMM);
+	}
+      arc_infop->operands_count ++;
+    }
 
   return insn_len;
 }
@@ -1249,30 +1323,6 @@ arc_get_disassembler (bfd *abfd)
     }
 
   return print_insn_arc;
-}
-
-/* Disassemble ARC instructions.  Used by debugger.  */
-
-struct arcDisState
-arcAnalyzeInstr (bfd_vma memaddr,
-		 struct disassemble_info *info)
-{
-  struct arcDisState ret;
-  memset (&ret, 0, sizeof (struct arcDisState));
-
-  ret.instructionLen = print_insn_arc (memaddr, info);
-
-#if 0
-  ret.words[0] = insn[0];
-  ret.words[1] = insn[1];
-  ret._this = &ret;
-  ret.coreRegName = _coreRegName;
-  ret.auxRegName = _auxRegName;
-  ret.condCodeName = _condCodeName;
-  ret.instName = _instName;
-#endif
-
-  return ret;
 }
 
 void
@@ -1325,172 +1375,6 @@ read_instruction (bfd_vma addr, unsigned int length,
   return ARRANGE_ENDIAN (info, buffer);
 }
 
-/* Identify instruction subopcodes.  In ARC ISA opcodes are always 5 most
-   significant bits: 27-31 for 32-bit instructions, 11-15 for 16-bit
-   instructions.  Subopcodes, however are not very unified - there lots of
-   various formats; depending on opcode, subopcode may appear at different
-   locations in instruction or may not be present at all.  On top of that many
-   subopcodes have subopcodes of their own.  Subopcode hierarhy is not always
-   symmetric, for example for [opcode=0x01 subopcode1=0x0] there is also
-   subopcode2, but for [opcode=0x01 subopcode1=0x1] there is subopcode2 and
-   subopcode3.  Perhaps, the most complex example are 16-bite stack based
-   operations with opcode 0x18.  Bits 5-7 contain subopcode1.  Subopcodes 0x0,
-   0x1, 0x2, 0x3 and 0x4 don't have any further subopcodes.  Subopcode1=0x5 has
-   an additional subopcode2 at the bit 8 (bits 9 and 10 are always zero).  And
-   subopcodes1 0x6 and 0x7 contain their subopcode2 at the bit 0.  And if and
-   only if subopcode2 is 0x1, then bits 1-4 are also a subopcode3.  */
-
-static void
-set_insn_subopcodes (struct arc_instruction *insn)
-{
-  /* Find subopcode.  */
-  switch (insn->opcode)
-    {
-    case 0x00:
-      insn->subopcode1 = BITS (insn->raw_word, 16, 16);
-      break;
-    case 0x01:
-      insn->subopcode1 = BITS (insn->raw_word, 16, 16);
-      if (insn->subopcode1 == 0x1)
-	{
-	  insn->subopcode2 = BITS (insn->raw_word, 4, 4);
-	  insn->subopcode3 = BITS (insn->raw_word, 0, 3);
-	}
-      else
-	{
-	  insn->subopcode2 = BITS (insn->raw_word, 17, 17);
-	}
-      break;
-    /* No subopcodes for 0x02 - 0x03.  */
-    case 0x04:
-    case 0x05:
-    case 0x06:
-    case 0x07:
-      insn->subopcode1 = BITS (insn->raw_word, 16, 21);
-      if (insn->subopcode1 == 0x2F)
-	{
-	  insn->subopcode2 = BITS (insn->raw_word, 0, 5);
-	  if (insn->subopcode2 == 0x3F)
-	    insn->subopcode3 = BITS (insn->raw_word, 12, 14) << 3
-	      | BITS (insn->raw_word, 24, 26);
-	}
-      break;
-    case 0x08:
-      insn->subopcode1 = BITS (insn->raw_word, 2, 2);
-      break;
-    case 0x09:
-    case 0x0A:
-      insn->subopcode1 = BITS (insn->raw_word, 3, 3);
-      if (insn->subopcode1 == 0x0)
-	insn->subopcode1 = BITS (insn->raw_word, 3, 4);
-      break;
-    case 0x0B:
-      insn->subopcode1 = BITS (insn->raw_word, 10, 10);
-      break;
-    case 0x0C:
-    case 0x0D:
-      insn->subopcode1 = BITS (insn->raw_word, 3, 4);
-      break;
-    case 0x0E:
-      insn->subopcode1 = BITS (insn->raw_word, 2, 4);
-      break;
-    case 0x0F:
-      insn->subopcode1 = BITS (insn->raw_word, 0, 4);
-      if (insn->subopcode1 == 0x0)
-	{
-	  insn->subopcode2 = BITS (insn->raw_word, 5, 7);
-	  if (insn->subopcode2 == 0x7)
-	    {
-	      insn->subopcode3 = BITS (insn->raw_word, 8, 10);
-	      if (insn->subopcode3 == 0x4)
-		insn->condition_code = ARC_CC_EQ;
-	      else if (insn->subopcode3 == 0x5)
-		insn->condition_code = ARC_CC_NE;
-	    }
-	}
-      break;
-    /* No subopcodes for 0x10 - 0x16.  */
-    case 0x17:
-    case 0x18:
-      insn->subopcode1 = BITS (insn->raw_word, 5, 7);
-      /* PRM doesn't put this clearly, but 0x18 has subopcode2.  */
-      switch (insn->subopcode1)
-	{
-	case 0x5:
-	  /* ADD_S SP,SP,u7 and SUB_S SP,SP,u7.  */
-	  insn->subopcode2 = BITS (insn->raw_word, 8, 8);
-	  break;
-	case 0x6:
-	case 0x7:
-	  /* PUSH_S, POP_S, LEAVE_S, ENTER_S.  */
-	  insn->subopcode2 = BITS (insn->raw_word, 0, 0);
-	  /* If bit 0 is 0, then it is LEAVE_S, ENTER_S.  Otherwise subopcode
-	     should be expanded further.  */
-	  if (insn->subopcode2 != 0x0)
-	    insn->subopcode2 = BITS (insn->raw_word, 0, 4);
-	  break;
-	}
-      break;
-    case 0x19:
-      insn->subopcode1 = BITS (insn->raw_word, 9, 10);
-      break;
-    /* No subopcodes for 0x1A - 0x1B.  */
-    case 0x1C:
-      insn->subopcode1 = BITS (insn->raw_word, 7, 7);
-      break;
-    case 0x1D:
-      insn->subopcode1 = BITS (insn->raw_word, 7, 7);
-      insn->condition_code = (insn->subopcode1 == 0x0 ? ARC_CC_EQ : ARC_CC_NE);
-      break;
-    case 0x1E:
-      /* B_S, BEQ_S, BNE_S, Bcc_S.  */
-      insn->subopcode1 = BITS (insn->raw_word, 9, 10);
-      switch (insn->subopcode1)
-	{
-	case 0x1:
-	  insn->condition_code = ARC_CC_EQ;
-	  break;
-	case 0x2:
-	  insn->condition_code = ARC_CC_NE;
-	  break;
-	case 0x3:
-	  /* Bcc_S  */
-	  insn->subopcode2 = BITS (insn->raw_word, 6, 8);
-	  /* In this case subopcode2 is the condition code.  */
-	  switch (insn->subopcode2)
-	    {
-	    case 0x0:
-	      insn->condition_code = ARC_CC_GT;
-	      break;
-	    case 0x1:
-	      insn->condition_code = ARC_CC_GE;
-	      break;
-	    case 0x2:
-	      insn->condition_code = ARC_CC_LT;
-	      break;
-	    case 0x3:
-	      insn->condition_code = ARC_CC_LE;
-	      break;
-	    case 0x4:
-	      insn->condition_code = ARC_CC_HI;
-	      break;
-	    case 0x5:
-	      insn->condition_code = ARC_CC_HS;
-	      break;
-	    case 0x6:
-	      insn->condition_code = ARC_CC_LO;
-	      break;
-	    case 0x7:
-	      insn->condition_code = ARC_CC_LS;
-	      break;
-	    }
-	  break;
-	}
-      break;
-    /* No subopcodes for 0x1F.  */
-    }
-}
-
 /* Parse various instruction flags that are not part of the opcode/subopcode.
    This is mainly memory ops parameters - data size and register writeback.
    Another instruction flag is a condition code.  Note, however, that in case
@@ -1501,139 +1385,10 @@ set_insn_subopcodes (struct arc_instruction *insn)
 static void
 set_insn_flags (struct arc_instruction *insn, const struct arc_opcode *opcode)
 {
-  const unsigned char *flag_index;
-
-  for (flag_index = opcode->flags; *flag_index; flag_index++)
-    {
-      const struct arc_flag_class *flag_class
-	= &arc_flag_classes[*flag_index];
-      const unsigned int *flag_operand_index;
-
-      for (flag_operand_index = flag_class->flags; *flag_operand_index;
-	   flag_operand_index++)
-	{
-	  const struct arc_flag_operand *flag_operand
-	    = &arc_flag_operands[*flag_operand_index];
-	  unsigned int value;
-
-	  if (!flag_operand->favail)
-	    continue;
-
-	  value = ((insn->raw_word >> flag_operand->shift)
-		   & ((1 << flag_operand->bits) - 1));
-	  if (flag_operand->code == value)
-	    {
-	      switch (flag_operand->name[0])
-		{
-		case 'a':
-		  /* Address writeback mode.  */
-		  insn->writeback_mode = (enum arc_ldst_writeback_mode) value;
-		  break;
-		case 'b':
-		case 'h':
-		case 'w':
-		  /* Data size mode.  */
-		  insn->data_size_mode = (enum arc_ldst_data_size) value;
-		  break;
-		}
-
-	      /* Condition codes, which are mostly several characters.  */
-	      if (0 == strcmp (flag_operand->name, "eq")
-		  || 0 == strcmp (flag_operand->name, "z"))
-		insn->condition_code = ARC_CC_EQ;
-	      else if (0 == strcmp (flag_operand->name, "ne")
-		       || 0 == strcmp (flag_operand->name, "nz"))
-		insn->condition_code = ARC_CC_NE;
-	      else if (0 == strcmp (flag_operand->name, "p")
-		       || 0 == strcmp (flag_operand->name, "pl"))
-		insn->condition_code = ARC_CC_PL;
-	      else if (0 == strcmp (flag_operand->name, "n")
-		       || 0 == strcmp (flag_operand->name, "mi"))
-		insn->condition_code = ARC_CC_MI;
-	      else if (0 == strcmp (flag_operand->name, "c")
-		       || 0 == strcmp (flag_operand->name, "cs")
-		       || 0 == strcmp (flag_operand->name, "lo"))
-		insn->condition_code = ARC_CC_CS;
-	      else if (0 == strcmp (flag_operand->name, "cc")
-		       || 0 == strcmp (flag_operand->name, "nc")
-		       || 0 == strcmp (flag_operand->name, "hs"))
-		insn->condition_code = ARC_CC_CC;
-	      else if (0 == strcmp (flag_operand->name, "vs")
-		       || 0 == strcmp (flag_operand->name, "v"))
-		insn->condition_code = ARC_CC_VS;
-	      else if (0 == strcmp (flag_operand->name, "nv")
-		       || 0 == strcmp (flag_operand->name, "vc"))
-		insn->condition_code = ARC_CC_NV;
-	      else if (0 == strcmp (flag_operand->name, "gt"))
-		insn->condition_code = ARC_CC_GT;
-	      else if (0 == strcmp (flag_operand->name, "ge"))
-		insn->condition_code = ARC_CC_GE;
-	      else if (0 == strcmp (flag_operand->name, "lt"))
-		insn->condition_code = ARC_CC_LT;
-	      else if (0 == strcmp (flag_operand->name, "le"))
-		insn->condition_code = ARC_CC_LE;
-	      else if (0 == strcmp (flag_operand->name, "hi"))
-		insn->condition_code = ARC_CC_HI;
-	      else if (0 == strcmp (flag_operand->name, "ls"))
-		insn->condition_code = ARC_CC_LS;
-	      else if (0 == strcmp (flag_operand->name, "pnz"))
-		insn->condition_code = ARC_CC_PNZ;
-	    }
-	}
-    }
-
-  /* Disassembler doesn't set data size flags for some instructions - instead
-     each "data size" variation is a separate instruction.  */
-  if (arc_insn_match_op (insn, 0x03))
-    insn->data_size_mode
-      = (enum arc_ldst_data_size) BITS (insn->raw_word, 1, 2);
-  else if (arc_insn_match_op (insn, 0x15))
-    insn->data_size_mode = ARC_SCALING_B;
-  else if (arc_insn_match_op (insn, 0x16))
-    insn->data_size_mode = ARC_SCALING_H;
-  else if (arc_insn_match_subop1 (insn, 0x18, 3))
-    insn->data_size_mode = ARC_SCALING_B;
-
-  /* Opcodes disassembler doesn't set writeback flags for POP_S and PUSH_S.  */
   if (arc_insn_is_push_s (insn))
     insn->writeback_mode = ARC_WRITEBACK_AW;
   else if (arc_insn_is_pop_s (insn))
     insn->writeback_mode = ARC_WRITEBACK_AB;
-}
-
-static void
-set_insn_operands (struct arc_instruction *insn,
-		   const struct arc_opcode *opcode)
-{
-  unsigned int cur_operand_index;
-  const unsigned char *opindex;
-  for (opindex = opcode->operands, cur_operand_index = 0; *opindex; opindex++)
-    {
-      const struct arc_operand *operand = &arc_operands[*opindex];
-
-      if (operand->flags & ARC_OPERAND_FAKE)
-	continue;
-
-      if (operand->flags & ARC_OPERAND_LIMM)
-	{
-	  assert (insn->limm_p);
-	  insn->operands[cur_operand_index].kind = ARC_OPERAND_KIND_LIMM;
-	  insn->operands[cur_operand_index].value = 63;
-	}
-      else
-	{
-	  insn->operands[cur_operand_index].value
-	    = extract_operand_value (operand, (unsigned *)&(insn->raw_word));
-	  insn->operands[cur_operand_index].kind
-	    = (operand->flags & ARC_OPERAND_IR
-	       ? ARC_OPERAND_KIND_REG
-	       : ARC_OPERAND_KIND_SHIMM);
-	}
-
-      cur_operand_index += 1;
-      assert (cur_operand_index <= ARC_MAX_OPERAND_COUNT);
-    }
-  insn->operands_count = cur_operand_index;
 }
 
 void arc_insn_decode (bfd_vma addr,
@@ -1643,11 +1398,14 @@ void arc_insn_decode (bfd_vma addr,
 {
   int length_with_limm;
   const struct arc_opcode *opcode;
+  struct arc_disassemble_info *arc_infop;
 
   /* Ensure that insn would be in the reset state.  */
   memset (insn, 0, sizeof (struct arc_instruction));
 
   length_with_limm = disasm_func (addr, info);
+  assert (info->private_data != NULL);
+  arc_infop = info->private_data;
 
   /* There was an error when disassembling, for example memory read error.  */
   if (length_with_limm < 0)
@@ -1656,11 +1414,7 @@ void arc_insn_decode (bfd_vma addr,
       return;
     }
 
-  if (length_with_limm == 2 || length_with_limm == 6)
-    insn->length = 2;
-  else
-    insn->length = 4;
-
+  insn->length  = arc_infop->insn_len;;
   insn->address = addr;
 
   /* Quick exit if memory at this address is not an instruction.  */
@@ -1672,42 +1426,56 @@ void arc_insn_decode (bfd_vma addr,
 
   insn->valid = TRUE;
 
-  /* arc_opcode must be set if this is not a dis_noninsn.  */
-  assert (info->private_data != NULL);
-
-  opcode = (const struct arc_opcode *) info->private_data;
+  opcode = (const struct arc_opcode *) arc_infop->opcode;
   insn->insn_class = opcode->insn_class;
-
-  insn->raw_word = read_instruction (addr, insn->length, info);
-
-  if (insn->length == 2)
-    insn->opcode = BITS (insn->raw_word, 11, 15);
-  else
-    insn->opcode = BITS (insn->raw_word, 27, 31);
-  set_insn_subopcodes (insn);
-
-  /* Read LIMM if there is one.  */
-  if (length_with_limm > 4)
-    {
-      insn->limm_value = read_instruction (addr + insn->length, 4, info);
-      insn->limm_p = TRUE;
-    }
+  insn->limm_value = arc_infop->limm;
+  insn->limm_p     = arc->infop->limm_p;
 
   insn->is_control_flow = (info->insn_type == dis_branch
 			   || info->insn_type == dis_condbranch
 			   || info->insn_type == dis_jsr
 			   || info->insn_type == dis_condjsr);
+
   /* LEAVE_S has insn type dref and MEMORY opcode class, so has to be handled
      separately.  */
   if (arc_insn_is_leave_s (insn))
     insn->is_control_flow = TRUE;
 
-  /* ARC can have only one instruction in delay slot.  */
-  assert (info->branch_delay_insns <= 1);
   insn->has_delay_slot = info->branch_delay_insns;
+  insn->writeback_mode
+    = (enum arc_ldst_writeback_mode) arc_infop->writeback_mode;
+  insn->data_size_mode = info->data_size;
+  insn->condition_code = arc_infop->condition_code;
+  insn->operands = arc_infop->operands;
+  insn->operands_count = arc_infop->operands_count;
 
-  set_insn_flags (insn, opcode);
-  set_insn_operands (insn, opcode);
+  switch (opcode->insn_class)
+    {
+    case ENTER:
+      insn->kind = ENTER_INSN;
+      break;
+    case LEAVE:
+      insn->kind = LEAVE_INSN;
+      break;
+    case MOVE:
+      insn->kind = MOVE_INSN;
+      break;
+    case POP:
+      insn->kind = POP_INSN;
+      break;
+    case PUSH:
+      insn->kind = PUSH_INSN;
+      break;
+    case STORE:
+      insn->kind = STORE_INSN;
+      break;
+    case SUB:
+      insn->kind = SUB_INSN;
+      break;
+    default:
+      insn->kind = UNK_INSN;
+      break;
+    }
 }
 
 int

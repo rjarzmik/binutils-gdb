@@ -49,14 +49,20 @@ typedef enum
   CONTROL,
   DPI,
   DSP,
+  ENTER,
   FLOAT,
   INVALID,
   JUMP,
   KERNEL,
+  LEAVE,
   LOGICAL,
+  MOVE,
   MEMORY,
   NET,
   PMU,
+  POP,
+  PUSH,
+  STORE,
   XY
 } insn_class_t;
 
@@ -105,7 +111,10 @@ typedef enum
   F_CLASS_EXTEND = (1 << 2),
 
   /* Condition code flag.  */
-  F_CLASS_COND = (1 << 3)
+  F_CLASS_COND = (1 << 3),
+
+  /* Write back mode.  */
+  F_CLASS_WB = (1 << 4)
 } flag_class_t;
 
 /* The opcode table is an array of struct arc_opcode.  */
