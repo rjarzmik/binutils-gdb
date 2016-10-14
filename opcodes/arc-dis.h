@@ -74,6 +74,22 @@ extern "C" {
       ARC_CC_HI = 0xD,
       ARC_CC_LS = 0xE,
       ARC_CC_PNZ = 0xF,
+      ARC_CC_UNDEF0 = 0x10,
+      ARC_CC_UNDEF1 = 0x11,
+      ARC_CC_UNDEF2 = 0x12,
+      ARC_CC_UNDEF3 = 0x13,
+      ARC_CC_UNDEF4 = 0x14,
+      ARC_CC_UNDEF5 = 0x15,
+      ARC_CC_UNDEF6 = 0x16,
+      ARC_CC_UNDEF7 = 0x17,
+      ARC_CC_UNDEF8 = 0x18,
+      ARC_CC_UNDEF9 = 0x19,
+      ARC_CC_UNDEFA = 0x1A,
+      ARC_CC_UNDEFB = 0x1B,
+      ARC_CC_UNDEFC = 0x1C,
+      ARC_CC_UNDEFD = 0x1D,
+      ARC_CC_UNDEFE = 0x1E,
+      ARC_CC_UNDEFF = 0x1F
     };
 
   enum arc_operand_kind
@@ -92,10 +108,6 @@ extern "C" {
     enum arc_operand_kind kind;
   };
 
-  /* Only LEAVE_S can have this amount of operands.  Other
-     instructions have 3 operands at most.  */
-#define ARC_MAX_OPERAND_COUNT (4)
-
   /* Container for information about instruction.  Provides a higher
      level access to data that is contained in struct arc_opcode.  */
 
@@ -110,22 +122,13 @@ extern "C" {
     insn_class_t insn_class;
 
     /* Length (without LIMM).  */
-    unsigned int length;
-
-    /* Instruction word as it is, in the host endianness.  */
-    unsigned long raw_word;
+    unsigned length;
 
     /* Is there a LIMM in this instruction?  */
     int limm_p;
 
     /* Long immediate value.  */
-    unsigned long limm_value;
-
-    /* Some ARC instructions have subopcodes nested up to 3 layers.  */
-    unsigned int opcode;
-    unsigned int subopcode1;
-    unsigned int subopcode2;
-    unsigned int subopcode3;
+    unsigned limm_value;
 
     /* Is it a branch/jump instruction?  */
     int is_control_flow;
@@ -155,7 +158,7 @@ extern "C" {
        so called fake-operands - they are in the list of operands, but
        do not have any value of they own.  Those "operands" are not
        present in this array.  */
-    struct arc_insn_operand operands[ARC_MAX_OPERAND_COUNT];
+    struct arc_insn_operand operands[MAX_INSN_ARGS];
 
     unsigned int operands_count;
   };
@@ -166,80 +169,6 @@ extern "C" {
 			struct disassemble_info *di,
 			disassembler_ftype func,
 			struct arc_instruction *insn);
-
-  /* Get address of next instruction after INSN, assuming linear
-     execution (no taken branches).  If instruction has a delay slot,
-     then returned value will point at the instruction in delay slot.
-     That is - "address of instruction + instruction length with
-     LIMM".  */
-
-  static inline bfd_vma
-  arc_insn_get_linear_next_pc (const struct arc_instruction *insn)
-  {
-    /* In ARC long immediate is always 4 bytes.  */
-    return (insn->address + insn->length + (insn->limm_p ? 4 : 0));
-  }
-
-  /* Get register with base address of memory operation.  */
-
-  int arc_insn_get_memory_base_reg (const struct arc_instruction *insn);
-
-  /* Get offset of a memory operation INSN.  */
-
-  bfd_vma arc_insn_get_memory_offset (const struct arc_instruction *insn);
-
-
-  /* Provide insn_match shortcuts for commonly checked instructions.
-     There is an alternative: use opcode_data->name to check for
-     instruction, but using opcodes looks preferably because it is
-     possible that a new encoding can be added for an existing
-     instruction, so it will pass the "name" test, however it might,
-     for example, has a different set of operands, which will break
-     assumptions in current code about the operands.  If instructions
-     are detected by their opcodes, then it will be required to update
-     those matching instructions and all functions that use them.  */
-
-  static inline bfd_boolean
-  arc_insn_is_enter_s (const struct arc_instruction *insn)
-  {
-    return (insn->kind == ENTER_INSN);
-  }
-
-  static inline bfd_boolean
-  arc_insn_is_leave_s (const struct arc_instruction *insn)
-  {
-    return (insn->kind == LEAVE_INSN);
-  }
-
-  static inline bfd_boolean
-  arc_insn_is_mov (const struct arc_instruction *insn)
-  {
-    return (insn->kind == MOVE_INSN);
-  }
-
-  static inline bfd_boolean
-  arc_insn_is_pop_s (const struct arc_instruction *insn)
-  {
-    return (insn->kind == POP_INSN);
-  }
-
-  static inline bfd_boolean
-  arc_insn_is_push_s (const struct arc_instruction *insn)
-  {
-    return (insn->kind == PUSH_INSN);
-  }
-
-  static inline bfd_boolean
-  arc_insn_is_st (const struct arc_instruction *insn)
-  {
-    return (insn->kind == STORE_INSN);
-  }
-
-  static inline bfd_boolean
-  arc_insn_is_sub (const struct arc_instruction *insn)
-  {
-    return (insn->kind == SUB_INSN);
-  }
 
 #ifdef __cplusplus
 }

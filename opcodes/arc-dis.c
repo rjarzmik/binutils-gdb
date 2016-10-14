@@ -83,7 +83,7 @@ struct arc_disassemble_info
   bfd_boolean limm_p;
 
   /* LIMM value, if exists.  */
-  unsigned long limm;
+  unsigned limm;
 
   /* Condition code, if exists.  */
   unsigned condition_code;
@@ -94,7 +94,7 @@ struct arc_disassemble_info
   /* Number of operands.  */
   unsigned operands_count;
 
-  struct arc_insn_operand operands[ARC_MAX_OPERAND_COUNT];
+  struct arc_insn_operand operands[MAX_INSN_ARGS];
 };
 
 /* Globals variables.  */
@@ -1154,7 +1154,10 @@ print_insn_arc (bfd_vma memaddr,
 	}
       break;
     case MEMORY:
-      info->insn_type = dis_dref; /* FIXME! DB indicates mov as memory! */
+      info->insn_type = dis_dref;
+      break;
+    case LEAVE:
+      info->insn_type = dis_branch;
       break;
     default:
       info->insn_type = dis_nonbranch;
@@ -1350,69 +1353,26 @@ with -M switch (multiple options should be separated by commas):\n"));
   fpud            Recognize double precision FPU instructions.\n"));
 }
 
-/* Read instruction as-is from memory.  This reads only instruction, without
-   LIMM.  Returned value will be in converted encoding.  */
-
-static unsigned long
-read_instruction (bfd_vma addr, unsigned int length,
-		  struct disassemble_info *info)
-{
-  bfd_byte buffer[4];
-
-  /* This function, as used by the arc_insn_decode is always called after same
-     memory has been already read by print_insn_arc, so it seems unlikely that
-     we can land here when it is not possible to read memory from this address,
-     so return value of read_memory_func is ignored.  */
-  info->read_memory_func (addr, buffer, length, info);
-
-  if (length == 2)
-    {
-      unsigned int lowbyte = (info->endian == BFD_ENDIAN_LITTLE) ? 1 : 0;
-      unsigned int highbyte = (info->endian == BFD_ENDIAN_LITTLE) ? 0 : 1;
-      return (buffer[lowbyte] << 8) | buffer[highbyte];
-    }
-
-  return ARRANGE_ENDIAN (info, buffer);
-}
-
-/* Parse various instruction flags that are not part of the opcode/subopcode.
-   This is mainly memory ops parameters - data size and register writeback.
-   Another instruction flag is a condition code.  Note, however, that in case
-   of BRcc instructions disassembler doesn't set respective flags, so instead
-   insn->condition_code is set based on subopcode and that is done in
-   set_insn_subopcodes.  */
-
-static void
-set_insn_flags (struct arc_instruction *insn, const struct arc_opcode *opcode)
-{
-  if (arc_insn_is_push_s (insn))
-    insn->writeback_mode = ARC_WRITEBACK_AW;
-  else if (arc_insn_is_pop_s (insn))
-    insn->writeback_mode = ARC_WRITEBACK_AB;
-}
-
 void arc_insn_decode (bfd_vma addr,
 		      struct disassemble_info *info,
 		      disassembler_ftype disasm_func,
 		      struct arc_instruction *insn)
 {
-  int length_with_limm;
   const struct arc_opcode *opcode;
   struct arc_disassemble_info *arc_infop;
 
   /* Ensure that insn would be in the reset state.  */
   memset (insn, 0, sizeof (struct arc_instruction));
 
-  length_with_limm = disasm_func (addr, info);
-  assert (info->private_data != NULL);
-  arc_infop = info->private_data;
-
   /* There was an error when disassembling, for example memory read error.  */
-  if (length_with_limm < 0)
+  if (disasm_func (addr, info) < 0)
     {
       insn->valid = FALSE;
       return;
     }
+
+  assert (info->private_data != NULL);
+  arc_infop = info->private_data;
 
   insn->length  = arc_infop->insn_len;;
   insn->address = addr;
@@ -1429,109 +1389,21 @@ void arc_insn_decode (bfd_vma addr,
   opcode = (const struct arc_opcode *) arc_infop->opcode;
   insn->insn_class = opcode->insn_class;
   insn->limm_value = arc_infop->limm;
-  insn->limm_p     = arc->infop->limm_p;
+  insn->limm_p     = arc_infop->limm_p;
 
   insn->is_control_flow = (info->insn_type == dis_branch
 			   || info->insn_type == dis_condbranch
 			   || info->insn_type == dis_jsr
 			   || info->insn_type == dis_condjsr);
 
-  /* LEAVE_S has insn type dref and MEMORY opcode class, so has to be handled
-     separately.  */
-  if (arc_insn_is_leave_s (insn))
-    insn->is_control_flow = TRUE;
-
   insn->has_delay_slot = info->branch_delay_insns;
   insn->writeback_mode
     = (enum arc_ldst_writeback_mode) arc_infop->writeback_mode;
   insn->data_size_mode = info->data_size;
   insn->condition_code = arc_infop->condition_code;
-  insn->operands = arc_infop->operands;
+  memcpy (insn->operands, arc_infop->operands,
+	  sizeof (struct arc_insn_operand) * MAX_INSN_ARGS);
   insn->operands_count = arc_infop->operands_count;
-
-  switch (opcode->insn_class)
-    {
-    case ENTER:
-      insn->kind = ENTER_INSN;
-      break;
-    case LEAVE:
-      insn->kind = LEAVE_INSN;
-      break;
-    case MOVE:
-      insn->kind = MOVE_INSN;
-      break;
-    case POP:
-      insn->kind = POP_INSN;
-      break;
-    case PUSH:
-      insn->kind = PUSH_INSN;
-      break;
-    case STORE:
-      insn->kind = STORE_INSN;
-      break;
-    case SUB:
-      insn->kind = SUB_INSN;
-      break;
-    default:
-      insn->kind = UNK_INSN;
-      break;
-    }
-}
-
-int
-arc_insn_get_memory_base_reg (const struct arc_instruction *insn)
-{
-  assert (insn->insn_class == MEMORY);
-
-  /* POP_S and PUSH_S have SP as an implicit argument in a disassembler.  */
-  if (arc_insn_is_pop_s (insn) || arc_insn_is_push_s (insn))
-    return 28;
-
-  /* Other instructions all have at least two operands: operand 0 is data,
-     operand 1 is address.  Operand 2 is offset from address.  However, see
-     comment to operands_count - in some cases, third operand may be missing,
-     if it is 0.  */
-  assert (insn->operands_count >= 2);
-  return insn->operands[1].value;
-}
-
-bfd_vma
-arc_insn_get_memory_offset (const struct arc_instruction *insn)
-{
-  bfd_vma value;
-  assert (insn->insn_class == MEMORY);
-
-  /* POP_S and PUSH_S have offset as an implicit argument in a
-     disassembler.  */
-  if (arc_insn_is_pop_s (insn))
-    return 4;
-  else if (arc_insn_is_push_s (insn))
-    return -4;
-
-  /* Other instructions all have at least two operands: operand 0 is data,
-     operand 1 is address.  Operand 2 is offset from address.  However, see
-     comment to operands_count - in some cases, third operand may be missing,
-     if it is 0.  */
-  if (insn->operands_count < 3)
-    return 0;
-
-  assert (insn->operands[2].kind != ARC_OPERAND_KIND_REG);
-  value = (insn->operands[2].kind == ARC_OPERAND_KIND_LIMM
-	   ? insn->limm_value
-	   : insn->operands[2].value);
-
-  /* Handle scaling.  */
-  if (insn->writeback_mode == ARC_WRITEBACK_AS)
-    {
-      /* Byte data size is not valid for AS.  Halfword means shift by 1 bit.
-	 Word and double word means shift by 2 bits.  */
-      assert (insn->data_size_mode != ARC_SCALING_B);
-      if (insn->data_size_mode == ARC_SCALING_H)
-	value <<= 1;
-      else
-	value <<= 2;
-    }
-  return value;
 }
 
 

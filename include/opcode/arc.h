@@ -63,6 +63,7 @@ typedef enum
   POP,
   PUSH,
   STORE,
+  SUB,
   XY
 } insn_class_t;
 
